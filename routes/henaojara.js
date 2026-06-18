@@ -6,6 +6,16 @@ const streamParser = require("../lib/streamParsing.js");
 //const vercelBlob = require("@vercel/blob");
 require('dotenv').config()//process.env.var
 
+async function fetchWithTimeout(url, options = {}, timeoutMs = 5000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 exports.GetAiringAnimeFromWeb = async function () {
   return GetOnAir().then((data) => {
     if (!data || data.length < 1) throw Error("Invalid response!")
@@ -79,7 +89,7 @@ exports.GetAnimeBySlug = async function (slug) {
         season: 1,
         episode: ep.number,
         number: ep.number,
-        thumbnail: `${HENAOJARA_BASE}/cdn/img/episodios/${data.data.internalID}-${ep.number}.webp?t=0.1`,//`${HENAOJARA_BASE}/cdn/img/episodios/3988-${ep.number}.webp?t=0.1`,
+        thumbnail: `${HENAOJARA_BASE}/cdn/img/episodios/${data.data.internalID}-${ep.number}.webp?t=0.1`,
         released: new Date(d.setDate(d.getDate() - (epCount - ep.number))),
         available: true
       }
@@ -93,14 +103,14 @@ exports.GetAnimeBySlug = async function (slug) {
         number: epCount + 1,
         thumbnail: "https://i.imgur.com/3U6r1nF.jpg",
         released: new Date(data.data.next_airing_episode),
-        available: false //next episode is not available yet
+        available: false
       })
     }
-    if (videos.length === 1 && epCount === 1) { //If only one ep. probably a movie, remove the "Ep. 1" from the title
+    if (videos.length === 1 && epCount === 1) {
       videos[0].title = videos[0].title.replace(" Ep. 1", "")
     }
     links=[{name:"Henaojara",category:"Open in",url:data.data.url},{name:data.data.title,category:"share",url:data.data.url}]
-    if(data.data.related){//Add relation links if they exist
+    if(data.data.related){
       links.push(
         ...data.data.related.map((r) => {
           return { name: r.title, category: r.relation, url: `stremio:///detail/series/henaojara:${r.slug}` }
@@ -116,9 +126,8 @@ exports.GetAnimeBySlug = async function (slug) {
     }
   })
 }
-//WIP
+
 exports.GetItemStreams = async function (slug, onlyInternal=true, epNumber = 1) {
-  //if we don't get an episode number, use 1, that's how henaojara works
   return GetEpisodeLinks(slug, epNumber).then((data) => {
     if (!data) throw Error('Empty response!')
     return { data }
@@ -131,13 +140,13 @@ async function GetEpisodeLinks(slug, epNumber = 1) {
   try {
     const episodeData = async () => {
       if (slug && !epNumber)
-        return await fetch(HENAOJARA_BASE + "/ver/" + slug).then((resp) => {
+        return await fetchWithTimeout(HENAOJARA_BASE + "/ver/" + slug).then((resp) => {
           if ((!resp.ok) || resp.status !== 200) throw Error(`HTTP error! Status: ${resp.status}`)
           if (resp === undefined) throw Error(`Undefined response!`)
           return resp.text()
         }).catch(() => null);
       else if (slug && epNumber)
-        return await fetch(HENAOJARA_BASE + "/ver/" + slug + "-" + epNumber).then((resp) => {
+        return await fetchWithTimeout(HENAOJARA_BASE + "/ver/" + slug + "-" + epNumber).then((resp) => {
           if ((!resp.ok) || resp.status !== 200) throw Error(`HTTP error! Status: ${resp.status}`)
           if (resp === undefined) throw Error(`Undefined response!`)
           return resp.text()
@@ -169,7 +178,7 @@ async function GetEpisodeLinks(slug, epNumber = 1) {
     }
     const hex2a = (hex) => { var str = ''; for (var i = 0; i < hex.length; i += 2) str += String.fromCharCode(parseInt(hex.substr(i, 2), 16)); return str;};
     const serverData = async () => {
-      return await fetch(`${HENAOJARA_BASE}/hj`, {
+      return await fetchWithTimeout(`${HENAOJARA_BASE}/hj`, {
         "headers": {
           "accept": "*/*",
           "accept-language": "en,en-US;q=0.9,es-ES;q=0.8,es;q=0.7,fr;q=0.6,no;q=0.5",
@@ -227,7 +236,7 @@ async function GetEpisodeLinks(slug, epNumber = 1) {
 async function GetAnimeInfo(slug) {
   try {
     const url = `${HENAOJARA_BASE}/anime/${slug}`;
-    const html = await fetch(url).then((resp) => {
+    const html = await fetchWithTimeout(url).then((resp) => {
       if ((!resp.ok) || resp.status !== 200) throw Error(`HTTP error! Status: ${resp.status}`)
       if (resp === undefined) throw Error(`Undefined response!`)
       return resp.text()
@@ -235,21 +244,16 @@ async function GetAnimeInfo(slug) {
     if (!html) return null;
 
     const $ = cheerio.load(html);
-    //WIP
     const scripts = $("script");
-    // const nextAiringFind = scripts.map((_, el) => $(el).html()).get().find(script => script?.includes("var anime_info ="));
-    // const nextAiringInfo = nextAiringFind?.match(/anime_info = (\[.*\])/)?.[1];
 
     const animeInfo = {
       title: $("#l > div.info > div.info-b > h1").text() || $("#l > div.info > div.info-a > figure > img").attr("alt"),
       alternative_titles: $("#l > div.info > div.info-b > h3").text().split(",") || [],
       status: $("#l > div.info > div.info-b > span.e").text(),
-      //rating: $("div.ic-star-solid > div.text-lead").text(),
       type: $("#l > div.info > div.info-b > ul.dt > li:first-child").text().replace("Tipo: ", ""),
       cover: $("#l > div.info > div.info-a > figure > img").attr("data-src") || `${HENAOJARA_BASE}/cdn/img/anime/${slug}.webp`,
       synopsis: $("#l > div.info > div.info-b > div.tx > p").text(),
       genres: $("#l > div.info > div.info-b > ul.gn > li").map((_, el) => $(el).find("a").text().trim()).get(),
-      //next_airing_episode: nextAiringInfo ? JSON.parse(nextAiringInfo)?.[3] : undefined,
       episodes: [],
       internalID: html.match(/data-ai="(\d+)"/)?.[1],
       url
@@ -271,40 +275,16 @@ async function GetAnimeInfo(slug) {
       }
     }
 
-    // Relacionados
-    // const relatedEls = $("body > div > div.container > main > section:nth-child(2) > div > div.gradient-cut > div > div");
-    // const relatedAnimes = [];
-    // relatedEls.each((_, el) => {
-    //   const link = $(el).find("a");
-    //   const href = link.attr("href");
-    //   const title = $(el).find("h3").text().trim();
-    //   const relation = $(el).find("h3 + span").text().trim();
-    //   if (href && title) {
-    //     const slug = href.match(/\/media\/([^/]+)/)?.[1] || href;
-    //     relatedAnimes.push({
-    //       title,
-    //       relation,
-    //       slug,
-    //       url: `${ANIMEAV1_BASE}${href}`
-    //     });
-    //   }
-    // });
-
-    // Asigna la propiedad si hay elementos
-    // if (relatedAnimes.length > 0) {
-    //   animeInfo.related = relatedAnimes;
-    // }
-
     return animeInfo;
   } catch (error) {
-    console.error("Error al obtener la información del anime", slug, error);
-    throw error
+    console.warn("Skipping anime (timeout/error):", slug, error.message);
+    return null;
   }
 }
-//Adapted from TypeScript from https://github.com/ahmedrangel/animeflv-api/blob/main/server/utils/scrapers/getEpisodeLinks.ts
+
 async function SearchAnimesBySpecificURL(henaojaraURL) {
   try {
-    const html = await fetch(decodeURIComponent(henaojaraURL)).then((resp) => {
+    const html = await fetchWithTimeout(decodeURIComponent(henaojaraURL)).then((resp) => {
       if ((!resp.ok) || resp.status !== 200) throw Error(`HTTP error! Status: ${resp.status}`)
       if (resp === undefined) throw Error(`Undefined response!`)
       return resp.text()
@@ -353,8 +333,6 @@ async function SearchAnimesBySpecificURL(henaojaraURL) {
           mediaVec.push({
             title: $(el).find("h3").text() || $(el).find("figure > a > img").attr("alt"),
             cover: $(el).find("figure > a > img").attr("data-src"),
-            //synopsis: $(el).find("div > div > div > p").eq(1).text(),
-            //rating: $(el).find("article > div > p:nth-child(2) > span.Vts.fa-star").text(),
             slug: $(el).find("a").attr("href").replace("./anime/", ""),
             type: $(el).find("figure > a > b").text(),
             url: HENAOJARA_BASE + ($(el).find("a").attr("href").replace('.', '') || $(el).find("h3 > a").attr("href").replace('.', '')),
