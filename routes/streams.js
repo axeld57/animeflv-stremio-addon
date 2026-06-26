@@ -9,6 +9,7 @@ const animeFLVAPI = require('./animeFLV.js')
 const animeAV1API = require('./animeav1.js')
 const henaojaraAPI = require('./henaojara.js')
 const tioanimeAPI = require('./tioanime.js')
+const animejaraAPI = require('./animejara.js')
 const fuzzysort = require('fuzzysort')
 
 /**
@@ -41,16 +42,22 @@ function HandleStreamRequest(req, res, next) {
   let streams = []
   const idDetails = req.params.videoId.split(':')
   const videoID = idDetails[0] //We only want the first part of the videoID, which is the IMDB ID, the rest would be the season and episode
-  if ((videoID?.startsWith("animeflv")) || (videoID?.startsWith("animeav1")) || (videoID?.startsWith("henaojara")) || (videoID?.startsWith("tioanime"))) { //If we got an AnimeFLV or AnimeAV1 specific ID
+  if ((videoID?.startsWith("animeflv")) || (videoID?.startsWith("animeav1")) || (videoID?.startsWith("henaojara")) || (videoID?.startsWith("tioanime")) || (videoID?.startsWith("animejara"))) { //If we got an AnimeFLV or AnimeAV1 specific ID
     const ID = idDetails[1] //We want the second part of the videoID
     let episode = idDetails[2] //undefined if we don't get an episode number in the query, which is fine
+    let season
+    if(videoID?.startsWith("animejara")){
+      season = idDetails[2]
+      episode = idDetails[3]
+    }
     console.log(`\x1b[33mGot a ${req.params.type} with ${videoID} ID:\x1b[39m ${ID}`)
     console.log('Extra parameters:', res.locals.extraParams)
     const animeFLVp = animeFLVAPI.GetItemStreams(ID, onlyInternal, episode)
     const animeAV1p = animeAV1API.GetItemStreams(ID, onlyInternal, episode)
     const henaojarap = henaojaraAPI.GetItemStreams(ID, onlyInternal, episode)
     const tioanimep = tioanimeAPI.GetItemStreams(ID, onlyInternal, episode)
-    CombineStreams(animeFLVp, animeAV1p, henaojarap, tioanimep).then((combinedStreams)=>{
+    const animejarap = animejaraAPI.GetItemStreams(ID, onlyInternal, season, episode)
+    CombineStreams(animeFLVp, animeAV1p, henaojarap, tioanimep, animejarap).then((combinedStreams)=>{
       if (combinedStreams.length > 0) {
         console.log(`\x1b[36mGot ${combinedStreams.length} streams\x1b[39m`)
         res.header('Cache-Control', "max-age=86400, stale-while-revalidate=86400, stale-if-error=259200")
@@ -94,17 +101,25 @@ function HandleStreamRequest(req, res, next) {
     console.log('Extra parameters:', res.locals.extraParams)
     animeIMDBIDPromise.then((imdbID) => {
       if (!imdbID || imdbID === "null") throw Error("No IMDB ID")
-      console.log(`\x1b[33mGetting TMDB metadata for IMDB ID:\x1b[39m`, imdbID)
-      return Metadata.GetTMDBMeta(imdbID).then((TMDBmeta) => {
-        console.log('\x1b[36mGot TMDB metadata:\x1b[39m', TMDBmeta.shortPrint())
-        return TMDBmeta
-      }).catch((reason) => {
-        console.error("\x1b[31mDidn't get TMDB metadata because:\x1b[39m " + reason + ", \x1b[33mtrying Cinemeta...\x1b[39m")
-        return Metadata.GetCinemetaMeta(imdbID, req.params.type).then((Cinemeta) => {
-          console.log('\x1b[36mGot Cinemeta metadata:\x1b[39m', Cinemeta.shortPrint())
-          return Cinemeta
+      let metaProm
+      if ((season) && (parseInt(season) === 0) && (req.params.type==="series")){
+        console.log(`\x1b[33mGot a "special", searching Cinemeta with:`, imdbID, "to get the special's title:\x1b[39m")
+        metaProm=Metadata.GetSpecialMeta(imdbID,episode)
+      } else {
+        console.log(`\x1b[33mGetting TMDB metadata for IMDB ID:\x1b[39m`, imdbID)
+        metaProm=Metadata.GetTMDBMeta(imdbID).then((TMDBmeta) => {
+          console.log('\x1b[36mGot TMDB metadata:\x1b[39m', TMDBmeta.shortPrint())
+          return TMDBmeta
+        }).catch((reason) => {
+          console.error("\x1b[31mDidn't get TMDB metadata because:\x1b[39m " + reason + ", \x1b[33mtrying Cinemeta...\x1b[39m")
+          return Metadata.GetCinemetaMeta(imdbID, req.params.type).then((Cinemeta) => {
+            console.log('\x1b[36mGot Cinemeta metadata:\x1b[39m', Cinemeta.shortPrint())
+            return Cinemeta
+          })
         })
-      }).catch((err) => { //only catches error from TMDB or Cinemeta API calls, which we want
+      }
+      
+      return metaProm.catch((err) => { //only catches error from TMDB or Cinemeta API calls, which we want
         console.error('\x1b[31mFailed on metadata:\x1b[39m ' + err)
         if (!res.headersSent) {
           res.header('Cache-Control', "max-age=86400, stale-while-revalidate=86400, stale-if-error=259200")
@@ -114,28 +129,33 @@ function HandleStreamRequest(req, res, next) {
         throw err //We throw the error so we can catch it later
       })
     }).then((metadata) => {
-      const searchTerm = ((season) && (parseInt(season) !== 1)) ? `${metadata.title} ${season}` : metadata.title
+      const searchTerm = ((season) && (parseInt(season) !== 1) && (parseInt(season) !== 0)) ? `${metadata.title} ${season}` : metadata.title
       const animeFLVp = animeFLVAPI.SearchAnimeFLV(searchTerm).then((animeFLVitem) => {
-        const result = fuzzysort.go(searchTerm, animeFLVitem, {key: 'title', limit: 1, all: true})[0]?.obj || animeFLVitem.sort((a,b)=>(a.type === req.params.type && b.type !== req.params.type)?-1:0)[0];//Sort by type to enhance matching
+        const result = fuzzysort.go(searchTerm, animeFLVitem, {key: 'title', limit: 1})[0]?.obj || animeFLVitem.sort((a,b)=>(a.type === req.params.type && b.type !== req.params.type)?-1:0)[0];//Sort by type to enhance matching
         console.log('\x1b[36mGot AnimeFLV entry:\x1b[39m', result.title)
         return animeFLVAPI.GetItemStreams(result.slug, onlyInternal, episode)
       })
       const animeAV1p = animeAV1API.SearchAnimeAV1(searchTerm, req.params.type).then((animeFLVitem) => {
-        const result = fuzzysort.go(searchTerm, animeFLVitem, {key: 'title', limit: 1, all: true})[0]?.obj || animeFLVitem[0];
+        const result = fuzzysort.go(searchTerm, animeFLVitem, {key: 'title', limit: 1})[0]?.obj || animeFLVitem[0];
         console.log('\x1b[36mGot AnimeAV1 entry:\x1b[39m', result.title)
         return animeAV1API.GetItemStreams(result.slug, onlyInternal, episode)
       })
       const henaojarap = henaojaraAPI.SearchHenaojara(searchTerm).then((animeFLVitem) => {
-        const result = fuzzysort.go(searchTerm, animeFLVitem, {key: 'title', limit: 1, all: true})[0]?.obj || animeFLVitem[0];
+        const result = fuzzysort.go(searchTerm, animeFLVitem, {key: 'title', limit: 1})[0]?.obj || animeFLVitem.sort((a,b)=>(a.type === req.params.type && b.type !== req.params.type)?-1:0)[0];
         console.log('\x1b[36mGot Henaojara entry:\x1b[39m', result.title)
         return henaojaraAPI.GetItemStreams(result.slug, onlyInternal, episode)
       })
       const tioanimep = tioanimeAPI.SearchTioAnime(searchTerm, req.params.type).then((animeFLVitem) => {
-        const result = fuzzysort.go(searchTerm, animeFLVitem, {key: 'title', limit: 1, all: true})[0]?.obj || animeFLVitem[0];
+        const result = fuzzysort.go(searchTerm, animeFLVitem, {key: 'title', limit: 1})[0]?.obj || animeFLVitem[0];
         console.log('\x1b[36mGot TioAnime entry:\x1b[39m', result.title)
         return tioanimeAPI.GetItemStreams(result.slug, onlyInternal, episode)
       })
-      CombineStreams(animeFLVp, animeAV1p, henaojarap, tioanimep).then((combinedStreams)=>{
+      const animejarap = animejaraAPI.SearchAnimeJara(searchTerm, req.params.type).then((animeFLVitem) => {
+        const result = fuzzysort.go(searchTerm, animeFLVitem, {key: 'title', limit: 1})[0]?.obj || animeFLVitem[0];
+        console.log('\x1b[36mGot AnimeJara entry:\x1b[39m', result.title)
+        return animejaraAPI.GetItemStreams(result.slug, onlyInternal, season, episode)
+      })
+      CombineStreams(animeFLVp, animeAV1p, henaojarap, tioanimep, animejarap).then((combinedStreams)=>{
         if (combinedStreams.length > 0) {
           console.log(`\x1b[36mGot ${combinedStreams.length} streams\x1b[39m`)
           res.header('Cache-Control', "max-age=86400, stale-while-revalidate=86400, stale-if-error=259200")
@@ -198,8 +218,8 @@ function SearchParamsRegex(extraParams) {
   } else return {}
 }
 
-function CombineStreams(animeFLVPromise, animeAV1Promise, henaojaraPromise, tioanimePromise) {
-  return Promise.allSettled([animeFLVPromise, animeAV1Promise, henaojaraPromise, tioanimePromise]).then((results) => {
+function CombineStreams(animeFLVPromise, animeAV1Promise, henaojaraPromise, tioanimePromise, animejaraPromise) {
+  return Promise.allSettled([animeFLVPromise, animeAV1Promise, henaojaraPromise, tioanimePromise, animejaraPromise]).then((results) => {
     let combinedStreams = []
     if (results[0].value) {
       console.log(`\x1b[36mGot ${results[0].value.length} AnimeFLV streams\x1b[39m`)
@@ -244,6 +264,19 @@ function CombineStreams(animeFLVPromise, animeAV1Promise, henaojaraPromise, tioa
         combinedStreams = combinedStreams.concat(results[3].value.slice(lastInternalTio + 1)) //Append external links at the end
       }
     } else {console.error('\x1b[31mFailed on TioAnime slug search because:\x1b[39m ' + results[3].reason)}
+    if (results[4].value) {
+      console.log(`\x1b[36mGot ${results[4].value.length} AnimeJara streams\x1b[39m`)
+      lastInternal = combinedStreams.findLastIndex((stream)=>stream.url !== undefined)
+      lastInternalJara = results[4].value.findLastIndex((stream)=>stream.url !== undefined)
+      if (lastInternalJara === -1) {
+        combinedStreams = combinedStreams.concat(results[4].value) //AnimeJara has only external links, just append at the end
+      } else if ((lastInternalJara !== -1) && (lastInternal === -1)) {
+        combinedStreams = results[4].value.concat(combinedStreams) //Previous has only external links, prepend at the start
+      } else {
+        combinedStreams.splice(lastInternal + 1, 0, ...results[4].value.slice(0, lastInternalJara + 1)) //Both have internal links, insert AnimeJara internal links after last internal links
+        combinedStreams = combinedStreams.concat(results[4].value.slice(lastInternalJara + 1)) //Append external links at the end
+      }
+    } else {console.error('\x1b[31mFailed on AnimeJara slug search because:\x1b[39m ' + results[4].reason)}
     return combinedStreams
   })
 }
